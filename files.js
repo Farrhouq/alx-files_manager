@@ -1,188 +1,85 @@
-import { Router } from 'express';
-import FilesController from '../controllers/FilesController';
-import authenticateToken from '../middleware/auth';
+import fs from 'fs';
+import path from 'path';
+import { ObjectId } from 'mongodb';
+import { v4 } from 'uuid';
+import dbClient from './db';
 
-const filesRouter = Router();
+const FILE_TYPES = ['folder', 'file', 'image'];
+const FILES_DIR = process.env.FOLDER_PATH || '/tmp/files_manager';
 
-/**
- * GET /files/:id/data is excluded from this middleware
- * It uses a different authentication approach since it
- * response unauthorized access differs from the rest of the
- * files routes
- */
-filesRouter.use(authenticateToken);
+// Utility class for files database operations
+class FilesCollection {
+  /**
+   * Creates file document in database
+   * @param {object} fileData - file data
+   * @returns {object} - formatted file document
+   */
+  static async createFile(fileData) {
+    const collection = dbClient.getCollection('files');
+    const { name, type, data } = fileData;
+    let { parentId } = fileData;
+    parentId = parentId && ObjectId.isValid(parentId) ? new ObjectId(parentId) : 0;
 
-/**
- * @apiDefine XToken
- * @apiHeader {String} X-Token Users access token
- * @apiHeaderExample Header-Example:
- * "": ""
- */
+    // Validate name and type are okay
+    if (!name) throw new Error('Missing name');
+    if (!FILE_TYPES.includes(type)) throw new Error('Missing type');
 
-/**
- * @apiDefine Unauthorized
- * @apiError UnauthorizedAccess Invalid or missing token
- */
+    // Validate data is present if type is a file or image
+    if (type !== 'folder' && !data) throw new Error('Missing data');
 
-/**
- * @apiDefine NotFound
- * @apiError NotFound File not found
- */
+    // Validate parent folder exists in db, its type is a folder
+    const parentDocument = await FilesCollection.getFile({ _id: parentId });
+    if (parentId && !parentDocument) throw new Error('Parent not found');
+    if (parentId && parentDocument.type !== 'folder') throw new Error('Parent is not a folder');
 
-/**
- * @api {post} /files Post a file
- * @apiName PostFile
- * @apiGroup Files
- * @apiDescription Upload a new file or folder to the API.
- * Three thumbnails of the file are generated when the files is uploaded.
- * The thumbnails' widths are `100`, `250` and `500`
- * @apiUse XToken
- * @apiUse Unauthorized
- * @apiBody {String} name Filename
- * @apiBody {String=folder, file, image} type File type
- * @apiBody {String} [parentId=0] File's parent Id. Default: 0
- * @apiBody {Boolean} [isPublic=false] File view status
- * @apiBody {String} [data] Base64 content of file. Mandatory for type `file` and `image`
- * @apiSuccessExample Success-Response
- *  HTTP/1.1 201 OK
- *  {
- *    "id": "6432fdc01815ce25f2bc5871",
- *    "name": "myFile.txt",
- *    "type": "folder",
- *    "userId": "643307deac9bf5303c49bc6e",
- *    "parentId": "6432fe1b1815ce25f2bc5873",
- *    "isPublic": false
- *  }
- * @apiError MissingFileName File name is absent
- * @apiError MissingFileType File type is absent
- * @apiError MissingFileData File data is missing. Applicable to uploads of type `file` and `image`
- */
-filesRouter.post('/files', FilesController.postUpload);
+    // Store folder details in db
+    const fileDocument = { ...fileData, parentId };
+    if (type !== 'folder') {
+      fileDocument.localPath = path.join(FILES_DIR, v4());
+      delete fileDocument.data;
+    }
+    const fileId = (await collection.insertOne(fileDocument)).insertedId;
+    fileDocument._id = fileId;
+    if (type !== 'folder') fileDocument.data = data;
+    return fileDocument;
+  }
 
-/**
- * @api {get} /files/:id Get file details
- * @apiName GetFilesById
- * @apiGroup Files
- * @apiDescription Get file information from the API.
- * @apiUse XToken
- * @apiUse Unauthorized
- * @apiUse NotFound
- * @apiParam {String} id Files unique ID
- * @apiQuery {Number=100, 250, 500} [size] Specific file size to retrieve.
- * @apiSuccessExample Success-Example:
- *  HTTP/1.1 200 OK
- *  {
- *    "id": "6432fdc01815ce25f2bc5871",
- *    "name": "myFile.txt",
- *    "type": "folder",
- *    "userId": "643307deac9bf5303c49bc6e",
- *    "parentId": "6432fe1b1815ce25f2bc5873",
- *    "isPublic": false
- *  }
- */
-filesRouter.get('/files/:id', FilesController.getShow);
+  /**
+   * Retrieves file document from database
+   * @param {object} query - query parameters
+   * @returns { import('mongodb').Document} - file document
+   */
+  static async getFile(query) {
+    const collection = dbClient.getCollection('files');
+    const file = await collection.findOne(query);
+    return file;
+  }
 
-/**
- * @api {get} /files Get user's files
- * @apiName GetFiles
- * @apiGroup Files
- * @apiDescription Get all files belonging to a user.
- * @apiUse XToken
- * @apiUse Unauthorized
- * @apiQuery {String=0} [parentId] Parent id of files you want to view
- * @apiQuery {Number=0} [page] Page for navigation. Max files per page is 20
- * @apiSuccessExample Success-Example:
- *  HTTP/1.1 200 OK
- *  [
- *    {
- *      "id": "6432fdc01815ce25f2bc5871",
- *      "name": "myFile.txt",
- *      "type": "folder",
- *      "userId": "643307deac9bf5303c49bc6e"
- *      "parentId": "6432fe1b1815ce25f2bc5873",
- *      "isPublic": false
- *    },
- *    {
- *      "id": "6432fdc01815ce25f2bc7122",
- *      "name": "myFile.txt",
- *      "type": "folder",
- *      "userId": "643307deac9bf5303c49bc6e",
- *      "parentId": "6432fe1b1815ce25f2bc5873",
- *      "isPublic": false
- *    },
- *    {
- *      "id": "6432fdc01815ce25f2bc9876",
- *      "name": "myFile.txt",
- *      "type": "folder",
- *      "userId": "643307deac9bf5303c49bc6e",
- *      "parentId": 0,
- *      "isPublic": true
- *    }
- *  ]
- */
-filesRouter.get('/files', FilesController.getIndex);
+  /**
+   * Updates file document in database
+   * @param {object} query - query parameters
+   * @param {object} update - update parameters
+   * @returns {object} - update result
+   */
+  static async updateFile(query, update) {
+    const collection = dbClient.getCollection('files');
+    const res = await collection.updateOne(query, update);
+    return res;
+  }
 
-/**
- * @api {put} /files/:id Publish a file
- * @apiName PutPublish
- * @apiGroup Files
- * @apiDescription Change the viewing status of a file to public. This allows
- * other users to view data from this file.
- * @apiUse XToken
- * @apiUse Unauthorized
- * @apiUse NotFound
- * @apiParam {String} id Files unique ID
- * @apiSuccessExample Success-Example:
- *  HTTP/1.1 200 OK
- *  {
- *    "id": "6432fdc01815ce25f2bc5871",
- *    "name": "myFile.txt",
- *    "type": "folder",
- *    "userId": "643307deac9bf5303c49bc6e",
- *    "parentId": "6432fe1b1815ce25f2bc5873",
- *    "isPublic": true
- *  }
- */
-filesRouter.put('/files/:id/publish', FilesController.putPublish);
+  /**
+   * Stores file data in local storage
+   * @param {string} path - path to store file in local storage
+   * @param {string} data - file data in base64 format
+   */
+  static async storeFileData(path, data) {
+    // Make FOLDER_PATH directory if doesn't exist or isn't a directory
+    if (!fs.existsSync(FILES_DIR) || !fs.lstatSync(FILES_DIR).isDirectory()) {
+      fs.mkdirSync(FILES_DIR, { recursive: true });
+    }
+    // Create new file if type is file or image and add its details to db
+    fs.writeFileSync(path, Buffer.from(data, 'base64'));
+  }
+}
 
-/**
- * @api {put} /files/:id Unpublish a file
- * @apiName PutUnPublish
- * @apiGroup Files
- * @apiDescription Change the viewing status of a file to private.
- * Other users cannot see your file when you unpublish it.
- * @apiUse XToken
- * @apiUse Unauthorized
- * @apiUse NotFound
- * @apiParam {String} id Files unique ID
- * @apiSuccessExample Success-Example:
- *  HTTP/1.1 200 OK
- *  {
- *    "id": "6432fdc01815ce25f2bc5871",
- *    "name": "myFile.txt",
- *    "type": "folder",
- *    "userId": "643307deac9bf5303c49bc6e",
- *    "parentId": "6432fe1b1815ce25f2bc5873",
- *    "isPublic": false
- *  }
- */
-filesRouter.put('/files/:id/unpublish', FilesController.putUnpublish);
-
-/**
- * @api {put} /files/:id/data Gets file data
- * @apiName GetFileData
- * @apiGroup Files
- * @apiDescription This endpoint retrieves data of a `file` or `image`
- * belonging to a user. The files data is also accessible to other users
- * if it has been published, i.e, `isPublic` is `true`
- * @apiUse XToken
- * @apiUse Unauthorized
- * @apiUse NotFound
- * @apiParam {String} id Files unique ID
- * @apiSuccessExample Success-Example:
- *  HTTP/1.1 200 OK
- *  "Hello World"
- */
-filesRouter.get('/files/:id/data', FilesController.getFile);
-
-export default filesRouter;
+export default FilesCollection;
